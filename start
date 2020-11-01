@@ -1,5 +1,8 @@
 #!/bin/bash
 #-x
+set -euo pipefail
+# shellcheck source=/dev/null
+source "$HOME/.local/lib/stdlib.bash"
 
 ###############################
 # nas backup connections
@@ -45,17 +48,6 @@ TAPE_BUFF="3g"
 COMPRESSION_CMD="zstd -3"
 DECOMPRESSION_CMD="zstd -3 -d"
 
-###############################
-# Path to binaries
-TAR=/bin/tar
-MT=/usr/bin/mt-st
-MKDIR=/bin/mkdir
-MBUFFER=/usr/bin/mbuffer
-OPENSSL=/usr/bin/openssl
-PIPEMETER=/usr/bin/pipemeter
-COMPRESSION=/usr/bin/zstd
-UUENCODE=/usr/bin/uuencode
-
 #endof cfg
 ###############################
 
@@ -82,12 +74,12 @@ wait_for_next_tape() {
 }
 
 eject_tape() {
-    [ -e $MT ] && mt -f /dev/st0 status | grep ONLINE >/dev/null
+    mt -f /dev/st0 status | grep ONLINE >/dev/null
         rt=$?
     if [[ $rt -eq 0 ]]
     then
-        [ -e $MT ] && $MT -f $TAPE rewind
-        [ -e $MT ] && $MT -f $TAPE eject
+        mt -f "$TAPE" rewind
+        mt -f "$TAPE" eject
     fi
 }
 
@@ -194,14 +186,14 @@ sendmail() {
 
     if [[ -e $LOGFILE ]]
     then
-        attachments+="$UUENCODE $LOGFILE $( basename "$LOGFILE") ; "
+        attachments+=$(uuencode "$LOGFILE" "$(basename "$LOGFILE")")
     fi
 
     while true
     do
         if [[ -e $1 ]]
         then
-            attachments+="$UUENCODE $1 $(basename "$1") ; "
+            attachments+=$(uuencode "$1" "$(basename "$1")")
             shift
         else
             break
@@ -224,7 +216,7 @@ mount_nas() {
     else
         echo_log "mount nas"
 
-        "$MKDIR" "$NAS_MOUNT_DIR"
+        mkdir -p "$NAS_MOUNT_DIR"
         sudo mount.nfs "$MOUNT_NFS" "$NAS_MOUNT_DIR"
     fi
 }
@@ -234,17 +226,12 @@ mount_nas() {
 verify() {
 
     local s=0
-    [ -d "$LOGBASE" ] || "$MKDIR" -p "$LOGBASE" || ( error_log "error could not create log file -> stop" && s=1)
+    [ -d "$LOGBASE" ] || mkdir -p "$LOGBASE" || ( error_log "error could not create log file -> stop" && s=1)
 
     echo_log "verify programs"
-    [ -e $TAR ]         || ( error_log "tar is not installed (curr set to '$TAR' -> stop" && s=1)
-    [ -e $MT ]          || ( error_log "mt is not installed (curr set to '$MT' -> stop" && s=1)
-    [ -e $MKDIR ]       || ( error_log "mkdir is not installed (curr set to '$MKDIR' -> stop" && s=1)
-    [ -e $MBUFFER ]     || ( error_log "mbuffer is not installed (curr set to '$MBUFFER' -> stop" && s=1)
-    [ -e $OPENSSL ]     || ( error_log "opensll is not installed (curr set to '$OPENSSL' -> stop" && s=1)
-    [ -e $PIPEMETER ]   || ( error_log "pipemeter is not installed (curr set to '$PIPEMETER' -> stop" && s=1)
-    [ -e $COMPRESSION ] || ( error_log "compression is not installed (curr set to '$COMPRESSION' -> stop" && s=1)
-    [ -e $UUENCODE ]    || ( error_log "uuencode is not installed (curr set to '$UUENCODE' -> stop" && s=1)
+    for prog in tar mt mbuffer openssl pipemeter compression uuencode ; do
+        command_exists "$prog" || ( error_log "$prog is not installed -> stop" && s=1)
+    done
 
     echo_log "verify dirs"
     for d in $BACKUP_DIRS
@@ -264,7 +251,7 @@ verify() {
         fi
     done
 
-    { [ -e "$MT" ] && [ -e "$TAPE" ]; } || { error_log "tape is not present at '$TAPE' -> stop" && s=1; }
+    [ -e "$TAPE" ] || { error_log "tape is not present at '$TAPE' -> stop" && s=1; }
 
     [ -e "$KEYFILE" ]  || { error_log "key file is empty please generate one with 'openssl rand 512 > $KEYFILE'" && s=1; }
 
@@ -335,11 +322,11 @@ backup() {
             size=$( estimate_size )
 
             echo_log "estimates size is \'$size\'b"
-            "$TAR" "$TAR_ARGS" -cvf - "$BACKUP_DIRS"  2> "$FILELIST" | \
+            tar "$TAR_ARGS" -cvf - "$BACKUP_DIRS"  2> "$FILELIST" | \
                 pipemeter -s "$size" -a -b "$BLOCKSIZE" -l | \
                 "$COMPRESSION_CMD" | \
-                "$OPENSSL" enc -aes-256-cbc -pass "file:$KEYFILE" | \
-                "$MBUFFER" \
+                openssl enc -aes-256-cbc -pass "file:$KEYFILE" | \
+                mbuffer \
                     -A "bash -c \"source $SCRIPT; wait_for_next_tape\"" \
                     -P 95 \
                     -m "$TAPE_BUFF" \
@@ -374,7 +361,7 @@ backup() {
             echo please enter the number of tapes to read
             read -r tapes_count
 
-            "$MBUFFER" -n "$tapes_count" -i "$TAPE" \
+            mbuffer -n "$tapes_count" -i "$TAPE" \
                 -A "bash -c \"source $SCRIPT; wait_for_next_tape\"" \
                 -P 95 \
                 -m 0.5g \
@@ -382,9 +369,9 @@ backup() {
                 -L \
                 -q \
                 -s "$BLOCKSIZE" |
-                "$OPENSSL" enc -d -aes-256-cbc -pass "file:$KEYFILE" |
+                mbuffer enc -d -aes-256-cbc -pass "file:$KEYFILE" |
                 "$DECOMPRESSION_CMD" | \
-                "$TAR" "$TAR_ARGS" "-${OPT}vf" - "$OUTPUT_DIR" "$@" 2> "$FILELIST"
+                tar "$TAR_ARGS" "-${OPT}vf" - "$OUTPUT_DIR" "$@" 2> "$FILELIST"
         ;;
 
     estimate-tapes)
@@ -426,4 +413,3 @@ case "$0" in
         ;;
 esac
 #> $LOGFILE 2>&1
-#main
