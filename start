@@ -1,88 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #-x
 set -euo pipefail
-# shellcheck source=/dev/null
+# shellcheck source=../bash-stdlib/stdlib.bash
 source "$HOME/.local/lib/stdlib.bash"
 
-###############################
-# nas backup connections
-NAS=nas
-NAS_IP=192.168.178.10
-MOUNT_NFS="$NAS_IP:pool0"
-MOUNT_LOCAL="/data/pool0"
+test -f '.env' && source .env
 
-###############################
-# mail options
-MAIL_PREFRACE="[nas-backup]"
-
-###############################
-# Backup dirs; relative from Mount or full path
-NAS_MOUNT_DIR=$PWD/nasmount
-BACKUP_DIRS="homes photo docs docker cloud video /etc"
-KEYFILE="$PWD/key.txt"
-
-###############################
-# Backup Log folder
-LOGBASE=$PWD/backup.log
-LOGFILE=$LOGBASE/$NOW.backup.log
-FILELIST=$LOGBASE/$NOW.tar.list
-TAPENAMES=$LOGBASE/$NOW.backup.tapenames.txt
-
-###############################
-# Tape devie name
-TAPE="/dev/st0"
-TAPESIZE="400*1000*1000*1000"
-TAPESPEED="70*1000*1000"
-BLOCKSIZE="512K"
-
-###############################
-# Tar options
-TAR_ARGS="-b 1024"
-TAPE_BUFF="3g"
-
-###############################
-#compression
-# please add the pipe in order to also diable this compression completely
-#COMPRESSION_CMD="pigz -3 -p 32 "
-#DECOMPRESSION_CMD="pigz -dc -3 -p 32"
-COMPRESSION_CMD="zstd -3"
-DECOMPRESSION_CMD="zstd -3 -d"
-
-#endof cfg
-###############################
 
 SCRIPT=$(readlink -f "$0" 2>/dev/null)
 
 # Get todays day like Mon, Tue and so on
 NOW=$(date +"%a")
-
-
-wait_for_next_tape() {
-    sendmail_event NEXTTAPE
-    eject_tape
-    echo_log "wait for tape"
-    while true
-    do
-        mt -f /dev/st0 status | grep ONLINE >/dev/null
-            rt=$?
-            if [[ $rt -eq 0 ]]
-            then
-            break;
-        fi
-        sleep 2
-    done
-}
-
-eject_tape() {
-    mt -f /dev/st0 status | grep ONLINE >/dev/null
-        rt=$?
-    if [[ $rt -eq 0 ]]
-    then
-        mt -f "$TAPE" rewind
-        mt -f "$TAPE" eject
-    fi
-}
-
 
 ###############################################################################
 # log helper functions
@@ -111,20 +39,50 @@ error_log() {
 }
 
 ###############################################################################
+# tape helper functions
+
+wait_for_next_tape() {
+    sendmail_event NEXTTAPE
+    eject_tape
+    echo_log "wait for tape"
+    while true
+    do
+        mt -f /dev/st0 status | grep ONLINE >/dev/null
+            rt=$?
+            if [[ $rt -eq 0 ]]
+            then
+            break;
+        fi
+        sleep 2
+    done
+}
+
+eject_tape() {
+    mt -f /dev/st0 status | grep ONLINE >/dev/null
+        rt=$?
+    if [[ $rt -eq 0 ]]
+    then
+        mt -f "$TAPE" rewind
+        mt -f "$TAPE" eject
+    fi
+}
+
+
 
 ###############################################################################
 # helper function for tape change
 
+# turn a count of seconds into hh:mm::ss
+# useful with e.g. bash builtin $SECONDS
 calc_time()
 {
-    seconds=$( calc "(( $1 ) % 60 )" )
-    minutes=$( calc "(( $1 ) / 60 ) % 60 " | sed -n "s/\([0-9]*\).*/\1/p" )
-    hours=$(   calc "(( $1 ) / 60 ) / 60 " | sed -n "s/\([0-9]*\).*/\1/p"  )
-    echo "$hours:$minutes:$seconds"
+    local seconds="$1"
+    printf '%dh:%dm:%ds\n' $((seconds/3600)) $((seconds%3600/60)) $((seconds%60))
 }
+
 sendmail_for_backup_needed()
 {
-    sendmail \
+    do_sendmail \
         "please start a tapebackup" \
         "A tape backup would be needed now\n" \
         "$( main estimate-tapes )"
@@ -132,9 +90,9 @@ sendmail_for_backup_needed()
 
 estimate_size()
 {
-    cd "$NAS_MOUNT_DIR" > /dev/null || return
-    du -sbc "$BACKUP_DIRS" | sed -n "s/\([0-8]*\).*/\1/p" | tail -n1
-    cd - > /dev/null || return
+    local folders="$1"
+
+    du -sbc "$folders" | sed -n "s/\([0-8]*\).*/\1/p" | tail -n1
 }
 
 #### Custom functions #####
@@ -142,8 +100,8 @@ sendmail_event()
 {
     case $1 in
         FULLSTART)
-                export start_time=$SECONDS
-                sendmail "Full Backup started" "Full backup started for $BACKUP_DIRS"
+                start_time=$SECONDS
+                do_sendmail "Full Backup started" "Full backup started for $BACKUP_DIRS"
             ;;
         FULLEND)
                 end_time=$SECONDS
@@ -154,20 +112,20 @@ sendmail_event()
                     tar -cjf "$FILELIST.bz2.tar" "$FILELIST"
                 fi
 
-                sendmail \
+                do_sendmail \
                     "finished backup" \
                     "$FILELIST.bz2.tar" \
                     "sucessfull backuped the following dirs $BACKUP_DIRS \n" \
                     "Time needed was $time_str"
             ;;
         NEXTTAPE)
-                sendmail "Next Tape please" "test" "Please change tape and not the order."
+            do_sendmail "Next Tape please" "test" "Please change tape and not the order."
             ;;
         FAIL)
                 end_time=$SECONDS
                 time=$(( end_time - start_time ))
                 time_str=$( calc_time $time )
-                sendmail \
+                do_sendmail \
                     "failed to backup" \
                     "$TAPENAMES"  \
                     "failed to backup the following dirs $BACKUP_DIRS \n" \
@@ -179,7 +137,7 @@ sendmail_event()
     esac
 }
 
-sendmail() {
+do_sendmail() {
     SUBJECT=$1
     shift
     local attachments
@@ -319,7 +277,7 @@ backup() {
             sendmail_event FULLSTART
             echo_log "estimate time for $BACKUP_DIRS"
             echo_log "please insert tape in the mean time if not already done"
-            size=$( estimate_size )
+            size=$( estimate_size "$BACKUP_DIRS")
 
             echo_log "estimates size is \'$size\'b"
             tar "$TAR_ARGS" -cvf - "$BACKUP_DIRS"  2> "$FILELIST" | \
@@ -375,7 +333,7 @@ backup() {
         ;;
 
     estimate-tapes)
-            size=$( estimate_size )
+            size=$( estimate_size "$BACKUP_DIRS" )
             echo "$size"
 
             size_str=$( numfmt --to iec --format "%8.4f" "$size" )
